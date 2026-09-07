@@ -77,7 +77,9 @@ public class SlotMap<T>
         // 지정한 형식이 참조 형식인지 아니면 참조 또는 참조가 포함된 값 형식인지를 나타내는 값을 반환합니다.
         if (RuntimeHelpers.IsReferenceOrContainsReferences<T>())
         {
-            _items[index] = default;
+            // T가 non-nullable 참조 타입이면 default는 null이라 컴파일러가 CS8601을 낸다.
+            // 이 칸은 죽었고 IsValid가 접근을 막으므로 의도된 동작이다. !로 그 사실을 표시한다.
+            _items[index] = default!;
         }
         return true;
     }
