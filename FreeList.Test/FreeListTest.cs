@@ -525,6 +525,193 @@ public class FreeListTest
         }
     }
 
+    // ── 순회 ──────────────────────────────────────────────
+    //
+    // MoveNext가 _index를 이어받지 않으면 순회가 끝나지 않는다.
+    // 그러면 테스트는 "실패"가 아니라 "멈춤"이 되어 실행 전체를 망친다.
+    // xUnit의 Fact(Timeout)은 async 테스트에서만 동작하므로 쓸 수 없어,
+    // 각 루프 안에 상한 카운터를 두어 즉시, 명확한 메시지로 실패시킨다.
+
+    [Fact]
+    public void 빈_맵은_순회하지_않는다()
+    {
+        var map = new SlotMap<int>(8);
+
+        int visited = 0;
+        foreach (var _ in map)
+        {
+            visited++;
+            Assert.True(visited <= 8, "빈 맵인데 순회가 돌았다 — MoveNext가 곧바로 false를 내야 한다");
+        }
+
+        Assert.Equal(0, visited);
+    }
+
+    // MoveNext가 죽은 칸을 건너뛰는지.
+    // 위치를 이어받지 않으면 첫 칸을 무한히 반환하므로 카운터로 즉시 잡는다.
+    [Fact]
+    public void 순회는_제거된_칸을_건너뛴다()
+    {
+        const int capacity = 8;
+        var map = new SlotMap<string>(capacity);
+
+        map.Add("A");
+        var b = map.Add("B");
+        map.Add("C");
+        var d = map.Add("D");
+        map.Add("E");
+
+        map.Remove(b);   // 1번 구멍
+        map.Remove(d);   // 3번 구멍
+
+        var values = new List<string>();
+        var indices = new List<int>();
+        foreach (var (handle, value) in map)
+        {
+            values.Add(value);
+            indices.Add(handle.Index);
+
+            Assert.True(values.Count <= capacity,
+                $"순회가 용량({capacity})을 넘겼다 — MoveNext가 위치를 이어받지 않아 "
+                + $"같은 칸을 반복 반환하고 있다 (마지막 핸들: {handle})");
+        }
+
+        Assert.Equal(new[] { "A", "C", "E" }, values);
+        Assert.Equal(new[] { 0, 2, 4 }, indices);
+    }
+
+    [Fact]
+    public void 순회한_개수는_Count와_같다()
+    {
+        var map = new SlotMap<int>(4);
+        var handles = new List<SlotHandle>();
+
+        for (int i = 0; i < 20; i++)     // 확장이 여러 번 일어난다
+            handles.Add(map.Add(i));
+
+        for (int i = 0; i < 20; i += 3)  // 군데군데 구멍을 낸다
+            map.Remove(handles[i]);
+
+        int visited = 0;
+        foreach (var _ in map)
+        {
+            visited++;
+            Assert.True(visited <= 64, "순회가 끝나지 않는다 — MoveNext가 위치를 이어받지 않는다");
+        }
+
+        Assert.Equal(map.Count, visited);
+    }
+
+    // 순회로 받은 핸들은 그대로 조작에 쓸 수 있어야 한다.
+    // 인덱스가 아니라 핸들을 내보내는 이유가 이것.
+    [Fact]
+    public void 순회로_받은_핸들은_유효하다()
+    {
+        var map = new SlotMap<int>(8);
+        for (int i = 0; i < 5; i++)
+            map.Add(i * 100);
+
+        int visited = 0;
+        foreach (var (handle, value) in map)
+        {
+            visited++;
+            Assert.True(visited <= 8, "순회가 끝나지 않는다 — MoveNext가 위치를 이어받지 않는다");
+
+            Assert.True(map.TryGet(handle, out int fetched), $"순회가 내준 핸들 {handle}이 무효다");
+            Assert.Equal(value, fetched);
+        }
+
+        Assert.Equal(5, visited);
+    }
+
+    // 순회하며 그 자리에서 지울 수 있다. Remove는 배열 위치를 바꾸지 않고
+    // 지워진 칸은 세대가 짝수가 되어 자연스럽게 건너뛰어진다.
+    // (Add는 다르다 — 확장이 일어나면 이미 지나간 자리를 다시 볼 수 있어 정의하지 않는다)
+    [Fact]
+    public void 순회하며_제거해도_나머지가_온전하다()
+    {
+        var map = new SlotMap<int>(16);
+        for (int i = 0; i < 10; i++)
+            map.Add(i);
+
+        int visited = 0;
+        foreach (var (handle, value) in map)
+        {
+            visited++;
+            Assert.True(visited <= 32, "순회가 끝나지 않는다 — MoveNext가 위치를 이어받지 않는다");
+
+            if (value % 2 == 0)
+                map.Remove(handle);
+        }
+
+        var left = new List<int>();
+        foreach (var (_, value) in map)
+        {
+            left.Add(value);
+            Assert.True(left.Count <= 32, "순회가 끝나지 않는다 — MoveNext가 위치를 이어받지 않는다");
+        }
+
+        Assert.Equal(new[] { 1, 3, 5, 7, 9 }, left);
+        Assert.Equal(5, map.Count);
+    }
+
+    /// <summary>
+    /// GetEnumerator가 호출될 때마다 독립된 열거자를 내주는지.
+    /// 위치를 SlotMap 자신이 들고 있으면 안쪽 루프가 바깥 루프를 망가뜨린다.
+    /// </summary>
+    [Fact]
+    public void 중첩_순회는_서로_간섭하지_않는다()
+    {
+        var map = new SlotMap<string>(8);
+        map.Add("A");
+        map.Add("B");
+        map.Add("C");
+
+        var pairs = new List<string>();
+        foreach (var (_, outer) in map)
+        foreach (var (_, inner) in map)
+        {
+            pairs.Add(outer + inner);
+            Assert.True(pairs.Count <= 64, "순회가 끝나지 않는다 — 열거자가 위치를 공유하고 있다");
+        }
+
+        Assert.Equal(9, pairs.Count);   // 3 x 3
+        Assert.Equal(
+            new[] { "AA", "AB", "AC", "BA", "BB", "BC", "CA", "CB", "CC" },
+            pairs);
+    }
+
+    // foreach는 GetEnumerator + while(MoveNext) + Current 로 컴파일된다.
+    // 즉 둘은 같은 코드이며 결과도 같아야 한다.
+    [Fact]
+    public void 수동_순회와_foreach는_같은_결과다()
+    {
+        var map = new SlotMap<int>(8);
+        var handles = new List<SlotHandle>();
+        for (int i = 0; i < 6; i++)
+            handles.Add(map.Add(i));
+        map.Remove(handles[1]);
+        map.Remove(handles[4]);
+
+        var byForeach = new List<int>();
+        foreach (var (_, value) in map)
+        {
+            byForeach.Add(value);
+            Assert.True(byForeach.Count <= 16, "foreach 순회가 끝나지 않는다");
+        }
+
+        var byHand = new List<int>();
+        var e = map.GetEnumerator();
+        while (e.MoveNext())
+        {
+            byHand.Add(e.Current.Value);
+            Assert.True(byHand.Count <= 16, "수동 순회가 끝나지 않는다");
+        }
+
+        Assert.Equal(byForeach, byHand);
+        Assert.Equal(new[] { 0, 2, 3, 5 }, byForeach);
+    }
+
     // 별도 메서드인 이유: 반환되면 지역 변수 data가 사라져 강한 참조가 SlotMap 것만 남는다.
     // 테스트 메서드 안에서 만들면 그 변수가 계속 붙잡아 Remove를 해도 수거되지 않는다.
     // 객체 자체를 반환하면 안 된다 — 받는 쪽 변수가 다시 붙잡는다.

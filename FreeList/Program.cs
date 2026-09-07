@@ -1,9 +1,20 @@
 ﻿using FreeList;
 
-var map = new SlotMap<int>(1);
+var map = new SlotMap<string>(8);
 
-var handle = map.Add(42);
+var a = map.Add("A");
+var b = map.Add("B");
+var c = map.Add("C");
+var d = map.Add("D");
+var eh = map.Add("E");
 
-map.TryGet(handle, out int value);
+map.Remove(b);   // 1번 구멍
+map.Remove(d);   // 3번 구멍
 
-Console.WriteLine(value);
+var e = map.GetEnumerator();
+while (e.MoveNext())
+    Console.WriteLine(e.Current);
+    
+    
+foreach (var (handle, value) in map)
+    Console.WriteLine($"{handle} = {value}");

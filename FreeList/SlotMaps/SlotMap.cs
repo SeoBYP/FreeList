@@ -152,4 +152,43 @@ public class SlotMap<T>
         _next = newNext;
         _generations = newGenerations;
     }
+    
+    public struct Enumerator
+    {
+        private readonly SlotMap<T> _map;
+        private int _index;
+        
+        internal Enumerator(SlotMap<T> map)
+        {
+            _map = map;
+            _index = -1;
+        }
+        
+        public bool MoveNext()
+        {
+            for (int i = _index + 1; i < _map._items.Length; i++)
+            {
+                if ((_map._generations[i] & 1) == 1)
+                {
+                    _index = i;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        public (SlotHandle Handle, T Value) Current
+        {
+            get
+            {
+                var handle = new SlotHandle(_index, _map._generations[_index]);
+                return (handle, _map._items[_index]);
+            }
+        }
+    }
+    
+    public Enumerator GetEnumerator()
+    {
+        return new Enumerator(this);
+    }
 }
