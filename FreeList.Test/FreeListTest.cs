@@ -1,8 +1,10 @@
+using System.Runtime.CompilerServices;
+
 namespace FreeList.Test;
 
 /// <summary>
 /// SlotMap 회귀 테스트. 각 테스트는 실제로 겪었던 버그 하나씩을 붙잡고 있다.
-/// 마지막 Grow 3건은 아직 미구현이라 실패한다(Red).
+/// 코드를 고치다 옛 버그가 되살아나면 여기서 잡힌다.
 /// </summary>
 public class FreeListTest
 {
@@ -11,7 +13,7 @@ public class FreeListTest
     [Fact]
     public void 생성_직후에는_비어있다()
     {
-        var map = new SlotMap(8);
+        var map = new SlotMap<int>(8);
 
         Assert.Equal(0, map.Count);
     }
@@ -20,7 +22,7 @@ public class FreeListTest
     [Fact]
     public void capacity가_1이어도_동작한다()
     {
-        var map = new SlotMap(1);
+        var map = new SlotMap<int>(1);
 
         int index = map.Add(42);
 
@@ -37,7 +39,7 @@ public class FreeListTest
     [InlineData(-100)]
     public void capacity가_0이하면_예외(int capacity)
     {
-        Assert.ThrowsAny<ArgumentException>(() => new SlotMap(capacity));
+        Assert.ThrowsAny<ArgumentException>(() => new SlotMap<int>(capacity));
     }
 
     // ── Add ───────────────────────────────────────────────
@@ -46,7 +48,7 @@ public class FreeListTest
     [Fact]
     public void Add는_실제_삽입_인덱스를_반환한다()
     {
-        var map = new SlotMap(8);
+        var map = new SlotMap<int>(8);
 
         Assert.Equal(0, map.Add(10));
         Assert.Equal(1, map.Add(20));
@@ -56,7 +58,7 @@ public class FreeListTest
     [Fact]
     public void Add하면_Count가_증가한다()
     {
-        var map = new SlotMap(8);
+        var map = new SlotMap<int>(8);
 
         map.Add(10);
         map.Add(20);
@@ -69,7 +71,7 @@ public class FreeListTest
     public void 초기_체인이_전체_칸을_잇는다()
     {
         const int capacity = 16;
-        var map = new SlotMap(capacity);
+        var map = new SlotMap<int>(capacity);
 
         for (int i = 0; i < capacity; i++)
             Assert.True(map.Add(i * 100) >= 0, $"{i}번째 Add 실패 — 체인이 중간에 끊겼다");
@@ -82,7 +84,7 @@ public class FreeListTest
     public void 할당된_인덱스는_중복되지_않는다()
     {
         const int capacity = 16;
-        var map = new SlotMap(capacity);
+        var map = new SlotMap<int>(capacity);
         var seen = new HashSet<int>();
 
         for (int i = 0; i < capacity; i++)
@@ -97,7 +99,7 @@ public class FreeListTest
     [Fact]
     public void 살아있는_칸은_제거된다()
     {
-        var map = new SlotMap(8);
+        var map = new SlotMap<int>(8);
         int index = map.Add(10);
 
         Assert.True(map.Remove(index));
@@ -108,7 +110,7 @@ public class FreeListTest
     [Fact]
     public void 같은_칸을_두_번_제거하면_거부된다()
     {
-        var map = new SlotMap(8);
+        var map = new SlotMap<int>(8);
         int index = map.Add(10);
 
         Assert.True(map.Remove(index));
@@ -119,7 +121,7 @@ public class FreeListTest
     [Fact]
     public void 이중_제거_후에도_체인이_망가지지_않는다()
     {
-        var map = new SlotMap(4);
+        var map = new SlotMap<int>(4);
 
         int a = map.Add(10);
         map.Add(20);
@@ -144,7 +146,7 @@ public class FreeListTest
     [InlineData(100000)]
     public void 범위_밖_인덱스는_예외없이_거부된다(int index)
     {
-        var map = new SlotMap(8);
+        var map = new SlotMap<int>(8);
         map.Add(10);
 
         Assert.False(map.Remove(index));
@@ -153,7 +155,7 @@ public class FreeListTest
     [Fact]
     public void 할당하지_않은_칸은_제거할_수_없다()
     {
-        var map = new SlotMap(8);
+        var map = new SlotMap<int>(8);
         map.Add(10);
 
         Assert.False(map.Remove(5));
@@ -164,7 +166,7 @@ public class FreeListTest
     [Fact]
     public void 거부된_제거는_Count를_바꾸지_않는다()
     {
-        var map = new SlotMap(8);
+        var map = new SlotMap<int>(8);
         int index = map.Add(10);
         map.Remove(index);
 
@@ -181,7 +183,7 @@ public class FreeListTest
     [Fact]
     public void 제거한_칸을_다음_Add가_재사용한다()
     {
-        var map = new SlotMap(8);
+        var map = new SlotMap<int>(8);
 
         int a = map.Add(10);
         map.Add(20);
@@ -194,7 +196,7 @@ public class FreeListTest
     [Fact]
     public void 재사용_순서는_LIFO다()
     {
-        var map = new SlotMap(8);
+        var map = new SlotMap<int>(8);
 
         int a = map.Add(10);
         int b = map.Add(20);
@@ -214,7 +216,7 @@ public class FreeListTest
     [Fact]
     public void 제거는_다른_칸을_건드리지_않는다()
     {
-        var map = new SlotMap(8);
+        var map = new SlotMap<int>(8);
 
         int a = map.Add(10);
         int b = map.Add(20);
@@ -233,7 +235,7 @@ public class FreeListTest
     [Fact]
     public void 살아있는_칸은_저장한_값을_돌려준다()
     {
-        var map = new SlotMap(8);
+        var map = new SlotMap<int>(8);
         int index = map.Add(1234);
 
         Assert.True(map.TryGet(index, out int value));
@@ -244,7 +246,7 @@ public class FreeListTest
     [Fact]
     public void 제거된_칸은_TryGet이_거부한다()
     {
-        var map = new SlotMap(8);
+        var map = new SlotMap<int>(8);
         int index = map.Add(1234);
         map.Remove(index);
 
@@ -258,7 +260,7 @@ public class FreeListTest
     [InlineData(99999)]
     public void 범위_밖_인덱스는_TryGet도_거부한다(int index)
     {
-        var map = new SlotMap(8);
+        var map = new SlotMap<int>(8);
         map.Add(10);
 
         Assert.False(map.TryGet(index, out _));
@@ -268,7 +270,7 @@ public class FreeListTest
     [Fact]
     public void 저장된_마이너스1과_실패는_구분된다()
     {
-        var map = new SlotMap(8);
+        var map = new SlotMap<int>(8);
         int index = map.Add(-1);
 
         Assert.True(map.TryGet(index, out int alive));
@@ -289,7 +291,7 @@ public class FreeListTest
     public void 랜덤_5000회_동안_불변식이_유지된다()
     {
         const int capacity = 64;
-        var map = new SlotMap(capacity);
+        var map = new SlotMap<int>(capacity);
         var expected = new Dictionary<int, int>();
         var random = new Random(12345);   // 고정 시드 = 실패 시 그대로 재현
 
@@ -336,7 +338,7 @@ public class FreeListTest
     public void 가득_차면_배열을_늘린다()
     {
         const int capacity = 4;
-        var map = new SlotMap(capacity);
+        var map = new SlotMap<int>(capacity);
 
         for (int i = 0; i < capacity; i++)
             map.Add(i);
@@ -352,7 +354,7 @@ public class FreeListTest
     public void Grow_후에도_기존_데이터가_살아있다()
     {
         const int capacity = 4;
-        var map = new SlotMap(capacity);
+        var map = new SlotMap<int>(capacity);
 
         var indices = new int[capacity];
         for (int i = 0; i < capacity; i++)
@@ -372,7 +374,7 @@ public class FreeListTest
     public void Grow로_늘어난_칸을_전부_쓸_수_있다()
     {
         const int capacity = 4;
-        var map = new SlotMap(capacity);
+        var map = new SlotMap<int>(capacity);
         var seen = new HashSet<int>();
 
         for (int i = 0; i < capacity * 4; i++)
@@ -383,5 +385,40 @@ public class FreeListTest
         }
 
         Assert.Equal(capacity * 4, map.Count);
+    }
+
+    // ── 참조 타입 누수 ───────────────────────────────────
+
+    // Remove가 참조를 놨는지는 반환값으로 못 본다. 그래서 GC로 간접 확인한다.
+    // 아무도 안 붙잡고 있어야 수거되므로, 수거됐다 == SlotMap이 놨다.
+    // WeakReference는 가리키되 GC 생존 판정에는 안 세는 참조 — 붙잡지 않고 관찰한다.
+    // SlotMap.Remove의 IsReferenceOrContainsReferences 블록을 주석 처리하면 실패해야 한다.
+    [Fact]
+    public void 참조_타입을_제거하면_GC가_수거한다()
+    {
+        var map = new SlotMap<byte[]>(8);
+        var (index, weak) = CreateWeakReference(map);
+        
+        map.Remove(index);
+        
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        
+        Assert.False(weak.IsAlive);
+    }
+    
+    
+    
+    // 별도 메서드인 이유: 반환되면 지역 변수 data가 사라져 강한 참조가 SlotMap 것만 남는다.
+    // 테스트 메서드 안에서 만들면 그 변수가 계속 붙잡아 Remove를 해도 수거되지 않는다.
+    // 객체 자체를 반환하면 안 된다 — 받는 쪽 변수가 다시 붙잡는다.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static (int index, WeakReference weak) CreateWeakReference(SlotMap<byte[]> map)
+    {
+        var data = new byte[1024];
+        var weak = new WeakReference(data);
+        int index = map.Add(data);
+        return (index, weak);
     }
 }
