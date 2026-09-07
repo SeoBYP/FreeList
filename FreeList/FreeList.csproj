@@ -7,4 +7,9 @@
         <Nullable>enable</Nullable>
     </PropertyGroup>
 
+    <ItemGroup>
+        <!-- 테스트에서 잘못된 핸들(음수 인덱스 등)을 직접 만들어 검증하기 위해 -->
+        <InternalsVisibleTo Include="FreeList.Test"/>
+    </ItemGroup>
+
 </Project>

@@ -1,10 +1,9 @@
 ﻿using FreeList;
 
-const int capacity = 4;
-var map = new SlotMap<int>(capacity);
+var map = new SlotMap<int>(1);
 
-var indices = new SlotHandle[capacity];
-for (int i = 0; i < capacity; i++)
-    indices[i] = map.Add(i * 10);
-    
-map.Add(999);
+var handle = map.Add(42);
+
+map.TryGet(handle, out int value);
+
+Console.WriteLine(value);
