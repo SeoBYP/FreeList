@@ -1,6 +1,5 @@
 ﻿using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
-using System.Text;
 
 namespace FreeList;
 
@@ -9,6 +8,8 @@ public class SlotMap<T>
     private T[] _items;
     private int[] _next;
     private bool[] _alives;
+    // 세대 관리 배열
+    private int[] _generations;
     private int _freeHead;
     private int _count;
 
@@ -22,6 +23,8 @@ public class SlotMap<T>
         _items = new T[capacity];
         _next = new int[capacity];
         _alives = new bool[capacity];
+        _generations = new int[capacity];
+        Array.Fill(_generations, 1);
         for (int i = 0; i < _items.Length; i++)
         {
             _next[i] = i + 1;
@@ -38,7 +41,7 @@ public class SlotMap<T>
     /// </summary>
     /// <param name="item"></param>
     /// <returns></returns>
-    public int Add(T item)
+    public SlotHandle Add(T item)
     {
         if (_freeHead == -1)
         {
@@ -51,21 +54,29 @@ public class SlotMap<T>
         _count++;
         _alives[index] = true;
 
-        return index;
+        // Add할 때 현재 세대 + Index를 같이 반환
+        return new SlotHandle(index, _generations[index]);
     }
 
     /// <summary>
     /// 그 칸을 비우고 free 체인에 되돌림
     /// </summary>
     /// <param name="index"></param>
-    public bool Remove(int index)
+    public bool Remove(SlotHandle handle)
     {
-        if(!IsValid(index))
+        return Remove(handle.Index, handle.Generation);
+    }
+    
+    private bool Remove(int index, int generation)
+    {
+        if(!IsValid(index, generation))
             return false;   
         _count--;
         _next[index] = _freeHead;
         _freeHead = index;
         _alives[index] = false;
+        // 제거할 때 세대 증가, 이전 세대 재사용 방지
+        _generations[index]++;
         // 지정한 형식이 참조 형식인지 아니면 참조 또는 참조가 포함된 값 형식인지를 나타내는 값을 반환합니다.
         if (RuntimeHelpers.IsReferenceOrContainsReferences<T>())
         {
@@ -81,9 +92,14 @@ public class SlotMap<T>
     /// <param name="index"></param>
     /// <param name="value"></param>
     /// <returns></returns>
-    public bool TryGet(int index, [MaybeNullWhen(false)] out T value)
+    public bool TryGet(SlotHandle handle, [MaybeNullWhen(false)] out T value)
     {
-        if (!IsValid(index))
+        return TryGet(handle.Index, handle.Generation, out value);
+    }
+
+    private bool TryGet(int index, int generation, [MaybeNullWhen(false)] out T value)
+    {
+        if (!IsValid(index, generation))
         {
             value = default;
             return false;
@@ -93,7 +109,7 @@ public class SlotMap<T>
         return true;
     }
 
-    private bool IsValid(int index)
+    private bool IsValid(int index, int generation)
     {
         // 음수, 길이를 초과한 인덱스 입력시 종료
         if (index < 0 || index >= _items.Length)
@@ -106,6 +122,11 @@ public class SlotMap<T>
         {
             return false;
         }
+
+        if (generation != _generations[index])
+        {
+            return false;
+        }
         return true;
     }
 
@@ -115,14 +136,17 @@ public class SlotMap<T>
         var newItems = new T[newCapacity];
         var newNext = new int[newCapacity];
         var newAlives = new bool[newCapacity];
+        var newGenerations = new int[newCapacity];
         var oldCapacity = _items.Length;
         
-        Array.Copy(_items, newItems, _items.Length);
-        Array.Copy(_alives, newAlives, _alives.Length);
+        Array.Copy(_items, newItems, oldCapacity);
+        Array.Copy(_alives, newAlives, oldCapacity);
         Array.Copy(_next, newNext, oldCapacity);
-        for (int i = oldCapacity; i < newNext.Length; i++)
+        Array.Copy(_generations, newGenerations, oldCapacity);
+        for (int i = oldCapacity; i < newCapacity; i++)
         {
             newNext[i] = i + 1;
+            newGenerations[i] = 1;
         }
         newNext[newCapacity - 1] = _freeHead;
         
@@ -131,5 +155,6 @@ public class SlotMap<T>
         _items = newItems;
         _next = newNext;
         _alives = newAlives;
+        _generations = newGenerations;
     }
 }

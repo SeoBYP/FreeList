@@ -1,4 +1,4 @@
-using System.Runtime.CompilerServices;
+﻿using System.Runtime.CompilerServices;
 
 namespace FreeList.Test;
 
@@ -24,11 +24,11 @@ public class FreeListTest
     {
         var map = new SlotMap<int>(1);
 
-        int index = map.Add(42);
+        var handle = map.Add(42);
 
-        Assert.Equal(0, index);
+        Assert.Equal(0, handle.Index);
         Assert.Equal(1, map.Count);
-        Assert.True(map.TryGet(index, out int value));
+        Assert.True(map.TryGet(handle, out int value));
         Assert.Equal(42, value);
     }
 
@@ -50,9 +50,18 @@ public class FreeListTest
     {
         var map = new SlotMap<int>(8);
 
-        Assert.Equal(0, map.Add(10));
-        Assert.Equal(1, map.Add(20));
-        Assert.Equal(2, map.Add(30));
+        Assert.Equal(0, map.Add(10).Index);
+        Assert.Equal(1, map.Add(20).Index);
+        Assert.Equal(2, map.Add(30).Index);
+    }
+
+    // 첫 발급 세대는 1. 0은 default(SlotHandle)과 겹치므로 비워둔다
+    [Fact]
+    public void 첫_발급_세대는_1이다()
+    {
+        var map = new SlotMap<int>(8);
+
+        Assert.Equal(1, map.Add(10).Generation);
     }
 
     [Fact]
@@ -74,23 +83,23 @@ public class FreeListTest
         var map = new SlotMap<int>(capacity);
 
         for (int i = 0; i < capacity; i++)
-            Assert.True(map.Add(i * 100) >= 0, $"{i}번째 Add 실패 — 체인이 중간에 끊겼다");
+            Assert.True(map.Add(i * 100).Index >= 0, $"{i}번째 Add 실패 — 체인이 중간에 끊겼다");
 
         Assert.Equal(capacity, map.Count);
     }
 
     // 체인이 순환하면 같은 칸이 여러 번 나가고 데이터가 조용히 덮어써진다
     [Fact]
-    public void 할당된_인덱스는_중복되지_않는다()
+    public void 동시에_살아있는_핸들은_중복되지_않는다()
     {
         const int capacity = 16;
         var map = new SlotMap<int>(capacity);
-        var seen = new HashSet<int>();
+        var seen = new HashSet<SlotHandle>();
 
         for (int i = 0; i < capacity; i++)
         {
-            int index = map.Add(i);
-            Assert.True(seen.Add(index), $"인덱스 {index} 중복 할당 — 체인이 순환한다");
+            var handle = map.Add(i);
+            Assert.True(seen.Add(handle), $"핸들 #{handle.Index}(g{handle.Generation}) 중복 발급 — 체인이 순환한다");
         }
     }
 
@@ -100,21 +109,21 @@ public class FreeListTest
     public void 살아있는_칸은_제거된다()
     {
         var map = new SlotMap<int>(8);
-        int index = map.Add(10);
+        var handle = map.Add(10);
 
-        Assert.True(map.Remove(index));
+        Assert.True(map.Remove(handle));
         Assert.Equal(0, map.Count);
     }
 
     // 이중 반납. 막지 않으면 _next[i] = i 가 되어 체인이 자기를 가리킨다
     [Fact]
-    public void 같은_칸을_두_번_제거하면_거부된다()
+    public void 같은_핸들로_두_번_제거하면_거부된다()
     {
         var map = new SlotMap<int>(8);
-        int index = map.Add(10);
+        var handle = map.Add(10);
 
-        Assert.True(map.Remove(index));
-        Assert.False(map.Remove(index));
+        Assert.True(map.Remove(handle));
+        Assert.False(map.Remove(handle));
     }
 
     // 이중 반납의 피해는 Remove가 아니라 그 뒤의 Add에서 드러난다
@@ -123,7 +132,7 @@ public class FreeListTest
     {
         var map = new SlotMap<int>(4);
 
-        int a = map.Add(10);
+        var a = map.Add(10);
         map.Add(20);
         map.Add(30);
         map.Add(40);
@@ -131,11 +140,11 @@ public class FreeListTest
         map.Remove(a);
         map.Remove(a);      // 거부되어야 함
 
-        int x = map.Add(50);
-        int y = map.Add(60);
+        var x = map.Add(50);
+        var y = map.Add(60);
 
-        Assert.Equal(a, x);
-        Assert.NotEqual(x, y);   // 자기 순환이면 같은 칸이 두 번 나온다
+        Assert.Equal(a.Index, x.Index);          // 그 한 칸을 재사용
+        Assert.NotEqual(x.Index, y.Index);       // 자기 순환이면 같은 칸이 두 번 나온다
     }
 
     // 과거 버그: _alives[index] 를 먼저 읽어 음수 인덱스에서 예외가 났다
@@ -149,16 +158,16 @@ public class FreeListTest
         var map = new SlotMap<int>(8);
         map.Add(10);
 
-        Assert.False(map.Remove(index));
+        Assert.False(map.Remove(new SlotHandle(index, 1)));
     }
 
     [Fact]
     public void 할당하지_않은_칸은_제거할_수_없다()
     {
         var map = new SlotMap<int>(8);
-        map.Add(10);
+        map.Add(10);                    // 0번만 사용
 
-        Assert.False(map.Remove(5));
+        Assert.False(map.Remove(new SlotHandle(5, 1)));
         Assert.Equal(1, map.Count);
     }
 
@@ -167,12 +176,12 @@ public class FreeListTest
     public void 거부된_제거는_Count를_바꾸지_않는다()
     {
         var map = new SlotMap<int>(8);
-        int index = map.Add(10);
-        map.Remove(index);
+        var handle = map.Add(10);
+        map.Remove(handle);
 
-        map.Remove(index);
-        map.Remove(-1);
-        map.Remove(9999);
+        map.Remove(handle);                        // 이중 반납
+        map.Remove(new SlotHandle(-1, 1));         // 음수
+        map.Remove(new SlotHandle(9999, 1));       // 범위 초과
 
         Assert.Equal(0, map.Count);
     }
@@ -185,11 +194,11 @@ public class FreeListTest
     {
         var map = new SlotMap<int>(8);
 
-        int a = map.Add(10);
+        var a = map.Add(10);
         map.Add(20);
         map.Remove(a);
 
-        Assert.Equal(a, map.Add(30));
+        Assert.Equal(a.Index, map.Add(30).Index);
     }
 
     // 반납분은 체인 맨 앞에 꽂히므로 최근 반납분이 먼저 나온다
@@ -198,16 +207,16 @@ public class FreeListTest
     {
         var map = new SlotMap<int>(8);
 
-        int a = map.Add(10);
-        int b = map.Add(20);
-        int c = map.Add(30);
+        var a = map.Add(10);
+        var b = map.Add(20);
+        var c = map.Add(30);
 
         map.Remove(a);
         map.Remove(c);
 
-        Assert.Equal(c, map.Add(40));
-        Assert.Equal(a, map.Add(50));
-        Assert.Equal(3, map.Add(60));   // 반납분 소진 후엔 한 번도 안 쓴 칸
+        Assert.Equal(c.Index, map.Add(40).Index);
+        Assert.Equal(a.Index, map.Add(50).Index);
+        Assert.Equal(3, map.Add(60).Index);        // 반납분 소진 후엔 한 번도 안 쓴 칸
 
         Assert.True(map.TryGet(b, out int vb));
         Assert.Equal(20, vb);
@@ -218,9 +227,9 @@ public class FreeListTest
     {
         var map = new SlotMap<int>(8);
 
-        int a = map.Add(10);
-        int b = map.Add(20);
-        int c = map.Add(30);
+        var a = map.Add(10);
+        var b = map.Add(20);
+        var c = map.Add(30);
 
         map.Remove(b);
 
@@ -236,21 +245,21 @@ public class FreeListTest
     public void 살아있는_칸은_저장한_값을_돌려준다()
     {
         var map = new SlotMap<int>(8);
-        int index = map.Add(1234);
+        var handle = map.Add(1234);
 
-        Assert.True(map.TryGet(index, out int value));
+        Assert.True(map.TryGet(handle, out int value));
         Assert.Equal(1234, value);
     }
 
-    // _items를 지우지 않아도 되는 이유. 판단 기준은 데이터가 아니라 _alives다
+    // _items를 지우지 않아도 되는 이유. 판단 기준은 데이터가 아니라 생존 표식과 세대다
     [Fact]
     public void 제거된_칸은_TryGet이_거부한다()
     {
         var map = new SlotMap<int>(8);
-        int index = map.Add(1234);
-        map.Remove(index);
+        var handle = map.Add(1234);
+        map.Remove(handle);
 
-        Assert.False(map.TryGet(index, out int value));
+        Assert.False(map.TryGet(handle, out int value));
         Assert.Equal(default(int), value);
     }
 
@@ -263,7 +272,7 @@ public class FreeListTest
         var map = new SlotMap<int>(8);
         map.Add(10);
 
-        Assert.False(map.TryGet(index, out _));
+        Assert.False(map.TryGet(new SlotHandle(index, 1), out _));
     }
 
     // Get이 -1로 실패를 알리던 설계의 문제. -1은 유효한 값이라 구분이 안 됐다
@@ -271,68 +280,92 @@ public class FreeListTest
     public void 저장된_마이너스1과_실패는_구분된다()
     {
         var map = new SlotMap<int>(8);
-        int index = map.Add(-1);
+        var handle = map.Add(-1);
 
-        Assert.True(map.TryGet(index, out int alive));
+        Assert.True(map.TryGet(handle, out int alive));
         Assert.Equal(-1, alive);
 
-        map.Remove(index);
+        map.Remove(handle);
 
-        Assert.False(map.TryGet(index, out _));
+        Assert.False(map.TryGet(handle, out _));
     }
 
-    // ── 종합 ──────────────────────────────────────────────
+    // ── 세대 핸들 ─────────────────────────────────────────
 
-    /// <summary>
-    /// 손으로 짠 시나리오는 생각한 경우만 확인한다. 랜덤으로 두들기며 매 스텝 검사:
-    /// Count가 실제 생존 수와 같은가 / 같은 인덱스가 두 번 할당되지 않는가 / 값이 온전한가
-    /// </summary>
+    // 칸이 재사용되면 옛 식별자가 새 주인을 가리킨다.
+    // 예외도 없고 false도 아니라, 죽은 대상을 만지는 줄 모르고 쓰게 된다.
+    // 인덱스에 발급 회차(세대)를 붙여야 막을 수 있다.
     [Fact]
-    public void 랜덤_5000회_동안_불변식이_유지된다()
+    public void 재사용된_칸을_옛_핸들로_읽을_수_없다()
     {
-        const int capacity = 64;
-        var map = new SlotMap<int>(capacity);
-        var expected = new Dictionary<int, int>();
-        var random = new Random(12345);   // 고정 시드 = 실패 시 그대로 재현
+        var map = new SlotMap<string>(8);
 
-        for (int step = 0; step < 5000; step++)
-        {
-            bool doAdd = expected.Count == 0 || random.Next(2) == 0;
+        var old = map.Add("고블린");
+        map.Remove(old);
+        map.Add("드래곤");          // 같은 칸을 재사용
 
-            if (doAdd)
-            {
-                int value = random.Next(-1000, 1000);   // 음수를 섞어 -1 함정을 확인
-                int index = map.Add(value);
-
-                if (index == -1)
-                {
-                    Assert.Equal(capacity, expected.Count);
-                }
-                else
-                {
-                    Assert.False(expected.ContainsKey(index),
-                        $"step {step}: 사용 중인 인덱스 {index}가 또 할당됐다");
-                    expected[index] = value;
-                }
-            }
-            else
-            {
-                int victim = expected.Keys.ElementAt(random.Next(expected.Count));
-                Assert.True(map.Remove(victim), $"step {step}: 살아있는 칸 {victim} 제거 실패");
-                expected.Remove(victim);
-            }
-
-            Assert.Equal(expected.Count, map.Count);
-        }
-
-        foreach (var (index, value) in expected)
-        {
-            Assert.True(map.TryGet(index, out int actual), $"인덱스 {index}가 죽어 있다");
-            Assert.Equal(value, actual);
-        }
+        Assert.False(map.TryGet(old, out _));
     }
 
-    // ── Grow (미구현 — Red) ───────────────────────────────
+    // 읽기보다 위험한 경우 — 옛 핸들로 남의 객체를 지워버린다.
+    [Fact]
+    public void 재사용된_칸을_옛_핸들로_제거할_수_없다()
+    {
+        var map = new SlotMap<string>(8);
+
+        var old = map.Add("고블린");
+        map.Remove(old);
+        var current = map.Add("드래곤");
+
+        Assert.False(map.Remove(old));
+        Assert.True(map.TryGet(current, out var alive));   // 드래곤은 무사해야 한다
+        Assert.Equal("드래곤", alive);
+    }
+
+    // 같은 칸이라도 발급 회차가 다르면 다른 핸들이다
+    [Fact]
+    public void 재사용된_핸들은_옛_핸들과_다르다()
+    {
+        var map = new SlotMap<string>(8);
+
+        var old = map.Add("고블린");
+        map.Remove(old);
+        var reused = map.Add("드래곤");
+
+        Assert.Equal(old.Index, reused.Index);              // 물리적으로 같은 칸
+        Assert.NotEqual(old.Generation, reused.Generation); // 논리적으로 다른 주인
+        Assert.NotEqual(old, reused);
+    }
+
+    // default(SlotHandle)은 {0, 0}. 세대를 1부터 시작한 덕에 자동으로 무효가 된다
+    [Fact]
+    public void 기본값_핸들은_무효다()
+    {
+        var map = new SlotMap<string>(8);
+        map.Add("A");                                       // 0번 칸을 채워둔다
+
+        Assert.False(map.TryGet(default, out _));
+        Assert.False(map.Remove(default));
+        Assert.Equal(1, map.Count);
+    }
+
+    // 확장이 끼어들어도 세대는 보존돼야 한다. Resize에서 _generations를 빼먹으면 여기서 잡힌다
+    [Fact]
+    public void 확장을_건너뛴_옛_핸들도_거부된다()
+    {
+        var map = new SlotMap<string>(2);
+
+        var old = map.Add("고블린");
+        map.Add("오크");
+        map.Remove(old);
+        map.Add("드래곤");          // old 자리 재사용
+        map.Add("리치");            // 가득 → 확장
+
+        Assert.False(map.TryGet(old, out _));
+        Assert.False(map.Remove(old));
+    }
+
+    // ── 확장 ──────────────────────────────────────────────
 
     [Fact]
     public void 가득_차면_배열을_늘린다()
@@ -343,35 +376,35 @@ public class FreeListTest
         for (int i = 0; i < capacity; i++)
             map.Add(i);
 
-        int index = map.Add(999);
+        var handle = map.Add(999);
 
-        Assert.True(index >= capacity, "늘어난 구간의 칸을 받아야 한다");
+        Assert.True(handle.Index >= capacity, "늘어난 구간의 칸을 받아야 한다");
         Assert.Equal(capacity + 1, map.Count);
     }
 
-    // Grow에서 제일 흔한 실수. _items, _next, _alives 셋 다 옮겨야 한다
+    // 확장에서 제일 흔한 실수. _items, _next, _alives, _generations 네 배열을 모두 옮겨야 한다
     [Fact]
-    public void Grow_후에도_기존_데이터가_살아있다()
+    public void 확장_후에도_기존_데이터가_살아있다()
     {
         const int capacity = 4;
         var map = new SlotMap<int>(capacity);
 
-        var indices = new int[capacity];
+        var handles = new SlotHandle[capacity];
         for (int i = 0; i < capacity; i++)
-            indices[i] = map.Add(i * 10);
+            handles[i] = map.Add(i * 10);
 
-        Assert.True(map.Add(999) >= 0);
+        map.Add(999);   // 확장 발생
 
         for (int i = 0; i < capacity; i++)
         {
-            Assert.True(map.TryGet(indices[i], out int value), $"Grow 후 인덱스 {indices[i]}가 죽었다");
+            Assert.True(map.TryGet(handles[i], out int value), $"확장 후 핸들 #{handles[i].Index}가 죽었다");
             Assert.Equal(i * 10, value);
         }
     }
 
-    // Array.Resize는 새 자리를 0으로 채운다. -1이 아니다 — 새 구간 체인을 직접 이어야 한다
+    // 새로 만든 배열은 0으로 채워진다. -1이 아니므로 새 구간 체인을 직접 이어야 한다
     [Fact]
-    public void Grow로_늘어난_칸을_전부_쓸_수_있다()
+    public void 확장으로_늘어난_칸을_전부_쓸_수_있다()
     {
         const int capacity = 4;
         var map = new SlotMap<int>(capacity);
@@ -379,9 +412,9 @@ public class FreeListTest
 
         for (int i = 0; i < capacity * 4; i++)
         {
-            int index = map.Add(i);
-            Assert.True(index >= 0, $"{i}번째 Add 실패 — 새 칸이 체인에 안 이어졌다");
-            Assert.True(seen.Add(index), $"인덱스 {index} 중복 할당 — 새 구간 체인이 잘못됐다");
+            var handle = map.Add(i);
+            Assert.True(handle.Index >= 0, $"{i}번째 Add 실패 — 새 칸이 체인에 안 이어졌다");
+            Assert.True(seen.Add(handle.Index), $"인덱스 {handle.Index} 중복 할당 — 새 구간 체인이 잘못됐다");
         }
 
         Assert.Equal(capacity * 4, map.Count);
@@ -397,28 +430,110 @@ public class FreeListTest
     public void 참조_타입을_제거하면_GC가_수거한다()
     {
         var map = new SlotMap<byte[]>(8);
-        var (index, weak) = CreateWeakReference(map);
-        
-        map.Remove(index);
-        
+        var (handle, weak) = CreateWeakReference(map);
+
+        map.Remove(handle);
+
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
-        
+
         Assert.False(weak.IsAlive);
     }
-    
-    
-    
+
+    // ── 종합 ──────────────────────────────────────────────
+
+    /// <summary>
+    /// 손으로 짠 시나리오는 생각한 경우만 확인한다. 랜덤으로 두들기며 매 스텝 검사:
+    /// Count가 실제 생존 수와 같은가 / 살아있는 핸들이 또 발급되지 않는가 / 값이 온전한가
+    /// </summary>
+    [Fact]
+    public void 랜덤_5000회_동안_불변식이_유지된다()
+    {
+        var map = new SlotMap<int>(64);
+        var expected = new Dictionary<SlotHandle, int>();
+        var random = new Random(12345);   // 고정 시드 = 실패 시 그대로 재현
+
+        for (int step = 0; step < 5000; step++)
+        {
+            bool doAdd = expected.Count == 0 || random.Next(2) == 0;
+
+            if (doAdd)
+            {
+                int value = random.Next(-1000, 1000);   // 음수를 섞어 -1 함정을 확인
+                var handle = map.Add(value);
+
+                Assert.False(expected.ContainsKey(handle),
+                    $"step {step}: 살아있는 핸들 #{handle.Index}(g{handle.Generation})이 또 발급됐다");
+                expected[handle] = value;
+            }
+            else
+            {
+                var victim = expected.Keys.ElementAt(random.Next(expected.Count));
+                Assert.True(map.Remove(victim), $"step {step}: 살아있는 핸들 #{victim.Index} 제거 실패");
+                expected.Remove(victim);
+            }
+
+            Assert.Equal(expected.Count, map.Count);
+        }
+
+        foreach (var (handle, value) in expected)
+        {
+            Assert.True(map.TryGet(handle, out int actual), $"핸들 #{handle.Index}가 죽어 있다");
+            Assert.Equal(value, actual);
+        }
+    }
+
+    /// <summary>
+    /// 세대 검사에 구멍이 있으면 여기서 잡힌다.
+    /// 죽은 핸들을 모아두고 매 스텝 다시 찔러본다 — 하나라도 통과하면 실패.
+    /// </summary>
+    [Fact]
+    public void 죽은_핸들은_언제나_거부된다()
+    {
+        var map = new SlotMap<int>(8);
+        var live = new List<SlotHandle>();
+        var dead = new List<SlotHandle>();
+        var random = new Random(7);
+
+        for (int step = 0; step < 2000; step++)
+        {
+            if (live.Count == 0 || random.Next(2) == 0)
+            {
+                live.Add(map.Add(random.Next(1000)));
+            }
+            else
+            {
+                int i = random.Next(live.Count);
+                var victim = live[i];
+                live.RemoveAt(i);
+                Assert.True(map.Remove(victim), $"step {step}: 살아있는 핸들 제거 실패");
+                dead.Add(victim);
+            }
+
+            // 최근에 죽은 핸들 20개를 매번 다시 찔러본다
+            for (int k = Math.Max(0, dead.Count - 20); k < dead.Count; k++)
+            {
+                var stale = dead[k];
+                Assert.False(map.TryGet(stale, out _),
+                    $"step {step}: 죽은 핸들 #{stale.Index}(g{stale.Generation})로 읽혔다");
+                Assert.False(map.Remove(stale),
+                    $"step {step}: 죽은 핸들 #{stale.Index}(g{stale.Generation})로 제거됐다");
+            }
+
+            Assert.Equal(live.Count, map.Count);
+        }
+    }
+
     // 별도 메서드인 이유: 반환되면 지역 변수 data가 사라져 강한 참조가 SlotMap 것만 남는다.
     // 테스트 메서드 안에서 만들면 그 변수가 계속 붙잡아 Remove를 해도 수거되지 않는다.
     // 객체 자체를 반환하면 안 된다 — 받는 쪽 변수가 다시 붙잡는다.
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static (int index, WeakReference weak) CreateWeakReference(SlotMap<byte[]> map)
+    private static (SlotHandle handle, WeakReference weak) CreateWeakReference(SlotMap<byte[]> map)
     {
         var data = new byte[1024];
         var weak = new WeakReference(data);
-        int index = map.Add(data);
-        return (index, weak);
+        var handle = map.Add(data);
+        return (handle, weak);
     }
 }
