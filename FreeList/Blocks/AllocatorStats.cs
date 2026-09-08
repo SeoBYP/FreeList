@@ -8,6 +8,12 @@ public readonly struct AllocatorStats
     public int OverheadBytes { get; init;}
     public int FreeBlockCount { get; init;}
     public int LargestFreeBlock { get; init;}
+
+    public override string ToString() => $"Used: {UsedBytes} bytes, Free: {FreeBytes} bytes, Overhead: {OverheadBytes} bytes, Free Blocks: {FreeBlockCount}, Largest Free Block: {LargestFreeBlock} bytes";
     
+    public void Print()
+    {
+        Console.WriteLine(ToString());
+    }
     
 }
