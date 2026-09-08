@@ -8,6 +8,8 @@
 
 ### 왜 만들었나
 
+Unity DI 라이브러리 **VContainer**의 내부를 읽다가 시작됐다. 진입점을 매 프레임 돌리는 `PlayerLoopRunner`가 목록을 `List<T>`가 아니라 `FreeList<T>`로 들고 있었고, "왜 굳이?"가 궁금했다. 직접 만들어보기로 했다. (비교는 [9절](#9-실제-구현과-비교--vcontainer의-freelistt) 참고 — 만들고 나서 다시 읽으니 **같은 이름인데 다른 물건**이었다.)
+
 객체를 자주 만들고 버리는 프로그램(게임, 서버)에서는 GC 부담을 줄이기 위해 미리 배열을 잡아두고 슬롯을 재사용한다. 이때 **"어느 칸이 비어 있는가"를 어떻게 기억할 것인가**가 문제가 된다.
 
 가장 단순한 답은 `Stack<int>`에 빈 인덱스를 넣어두는 것이다. 동작은 하지만 원소 100만 개짜리 배열이면 최악의 경우 100만 개짜리 스택이 하나 더 필요하다. **메모리를 아끼려고 만든 구조가 메모리를 두 배로 쓴다.**
@@ -748,9 +750,125 @@ FreeList.dll    22:07:19    ← 14분 전 빌드
 
 ---
 
+## 9. 실제 구현과 비교 — VContainer의 `FreeList<T>`
+
+### 출발점이 된 코드
+
+```csharp
+// VContainer 1.19.0 · Runtime/Unity/PlayerLoopRunner.cs
+readonly FreeList<IPlayerLoopItem> runners = new FreeList<IPlayerLoopItem>(16);
+
+for (var i = 0; i < span.Length; i++)
+{
+    var item = span[i];
+    if (item != null)                    // null을 건너뛴다
+    {
+        if (!item.MoveNext())
+            runners.RemoveAt(i);         // 순회 도중 제거
+    }
+}
+```
+
+### VContainer의 구현
+
+```
+// Runtime/Internal/FreeList.cs
+T[] values;          백킹 배열
+int lastIndex;       마지막 유효 위치 (-1 비었음, -2 해제됨)
+object gate;         Add / RemoveAt 전용 lock
+
+Add(T)      →  values를 처음부터 훑어 null인 자리를 찾는다        O(n)
+RemoveAt(i) →  values[i] = null.  i가 lastIndex면 뒤로 스캔해 재계산
+성장        →  new T[len + len / 2]   (1.5배)
+```
+
+Unity 2021.3+ 에서는 배열을 `IntPtr`로 캐스팅해 0인 워드를 통째로 스캔하는 unsafe 경로가 붙지만, 여전히 선형 탐색이다.
+
+**free 체인이 없다.** 이름에 "free list"가 붙어 있지만 빈 칸을 잇는 링크도, `_freeHead`도 없다. 배열 하나가 전부다.
+
+### 차이
+
+| | VContainer `FreeList<T>` | 이 프로젝트 `SlotMap<T>` |
+|---|---|---|
+| **목적** | 매 프레임 순회하며 스스로를 제거하는 목록 | 안전한 핸들로 접근하는 슬롯 저장소 |
+| **빈 칸 표시** | `null` — 데이터 자리에 | 세대의 홀짝 비트 — 별도 배열에 |
+| **빈 칸 찾기** | 선형 탐색 O(n) | `_freeHead` O(1) |
+| **죽은 핸들** | 막을 수단 없음 (인덱스가 곧 신원) | 세대 불일치로 거부 |
+| **담을 타입** | 참조 타입만 (`null`이 필요하므로) | 값 타입 포함 전부 |
+| **GC 누수** | `null` 대입이 곧 정리 | `IsReferenceOrContainsReferences<T>`로 조건부 정리 |
+| **스레드** | 쓰기만 `lock`, 읽기는 단일 스레드 전제 | 단일 스레드 전용 |
+
+### 왜 체인을 안 만들었나
+
+이게 처음 궁금했던 것이고, 답은 셋이다.
+
+**① `Add`가 드물고 n이 작다**
+
+```
+Add       진입점 등록 — 스코프 빌드 시점에 몇 번
+RemoveAt  MoveNext()가 false를 반환할 때
+순회      매 프레임
+```
+
+매 프레임 도는 건 순회지 `Add`가 아니다. `Add`가 O(n)이어도 초당 60번 불릴 일이 없고, 기본 용량이 16이며 진입점은 보통 수십 개다. **없는 문제를 풀 이유가 없다.**
+
+**② `null`을 빈 표시로 고른 순간 체인 둘 자리가 사라진다**
+
+체인을 만들려면 빈 칸 어딘가에 "다음 빈 칸 번호"를 적어야 하는데, `null`로 비워버리면 적을 데가 없다. 둘은 한 세트다.
+
+그리고 `null`로 비우는 게 **목적 그 자체**였다. `List<T>.RemoveAt`은 뒤 원소를 앞으로 당겨서 순회 중 인덱스를 어긋나게 만든다. `null`로 비우면 안 흔들린다. **순회 중 제거가 이 자료구조의 존재 이유고, 슬롯 재사용은 부산물이다.**
+
+**③ 상태가 적을수록 잠글 것이 적다**
+
+`FreeList`는 `Add`/`RemoveAt`만 잠그고 순회는 안 잠근다. 이게 성립하는 이유가 "당기지 않는다" + "상태가 `values` 하나뿐"이다.
+
+```
+RemoveAt이 안 당긴다  →  순회 중인 인덱스가 안 흔들린다
+순회가 null을 검사     →  도중에 비어도 건너뛴다
+배열이 성장하면        →  순회 중인 Span은 옛 배열을 본다.
+                          새 항목은 다음 프레임에 보인다 (놓치는 게 아니라 늦는 것)
+```
+
+`_freeHead`와 `_next[]`를 두면 지켜야 할 불변식이 늘고 잠금 범위가 커진다. 무잠금 읽기도 그만큼 어려워진다.
+
+### 최적화 방향이 정반대다
+
+```
+VContainer     순회를 최적화한다       →  제거가 O(1), 추가는 O(n)이어도 됨
+이 프로젝트     할당·해제를 최적화한다   →  추가·제거가 O(1), 순회는 밀집도에 맡김
+```
+
+VContainer는 메모리 할당기를 만든 게 아니다. **"매 프레임 순회하면서 스스로를 제거하는 목록"**을 만들었고, 그 요구에 필요한 만큼만 만들었다.
+
+### 셋을 나란히 놓으면
+
+배열 개수로 보면 같은 문제에 대한 세 가지 답이 된다.
+
+```
+VContainer FreeList    values[]                          관리 정보를 안 만든다 (그때그때 찾는다)
+이 프로젝트 SlotMap     _items[] _next[] _generations[]   관리 정보를 옆 배열에 둔다
+이 프로젝트 BlockAllocator   byte[]                       관리 정보를 데이터 사이에 심는다
+```
+
+**어느 것이 옳은지는 워크로드가 정한다.** 4단계 측정에서 first-fit과 best-fit의 승자가 워크로드마다 뒤집혔던 것(문제 13)과 같은 결론이고, VContainer의 선택은 자기 워크로드에서 정확히 맞다.
+
+### 덤 — 이 구조에는 이름이 있다
+
+```csharp
+SlotHandle { int Index; int Generation; }     // 이 프로젝트
+Entity     { int Index; int Version;    }     // Unity DOTS
+```
+
+같은 구조다. 엔티티를 파괴하면 `Version`이 올라가고 옛 `Entity` 값으로는 접근이 거부된다. `EntityManager.Exists(entity)`가 `IsValid`가 하는 일이다.
+
+VContainer 내부를 읽다 시작한 것이 ECS 엔티티 시스템의 밑바닥까지 닿았다.
+
+---
+
 ## 참고 자료
 
 - [Slotmap: The budget allocator you probably should use](https://electrp.com/posts/slotmap/) — 세대 핸들 설계와 트레이드오프
 - [Memory Allocation Strategies Part 5: Free List Allocator — gingerBill](https://www.gingerbill.org/article/2021/11/30/memory-allocation-strategies-005/) — 가변 크기 블록의 정석
 - [Solving the ABA Problem for Lock-Free Free Lists — moodycamel](https://moodycamel.com/blog/2014/solving-the-aba-problem-for-lock-free-free-lists) — 스레드 안전 버전 필독
+- [VContainer — hadashiA](https://github.com/hadashiA/VContainer) — 이 프로젝트의 출발점. `Runtime/Internal/FreeList.cs`와 `Runtime/Unity/PlayerLoopRunner.cs` (9절 비교 참고)
 - [Object reuse with ObjectPool in ASP.NET Core — Microsoft Learn](https://learn.microsoft.com/en-us/aspnet/core/performance/objectpool) — .NET 표준 풀의 API 규약

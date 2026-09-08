@@ -1,5 +1,6 @@
 ﻿using System.Diagnostics;
 using FreeList;
+using FitPolicy = FreeList.BlockAllocator.FitPolicy;
 
 // BlockAllocator 워크로드 측정.
 //
