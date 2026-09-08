@@ -7,7 +7,9 @@ public sealed class BlockAllocator
     private const int HeaderSize = 4; // int 하나
     private const int Alignment = 4; // 모든 블록 크기는 4의 배수
     private const int MinPayload = 4; // 이보다 작은 자리는 만들지 않는다
-    private const int MinBlock = HeaderSize + MinPayload; // 8
+    private const int FooterSize = 4;
+    private const int BlockOverhead = HeaderSize + FooterSize;
+    private const int MinBlock = BlockOverhead + MinPayload;
 
     private readonly byte[] _arena;
 
@@ -22,7 +24,7 @@ public sealed class BlockAllocator
         if (capacity % Alignment != 0)
             throw new ArgumentException("capacity must be aligned");
         _arena = new byte[capacity];
-        WriteHeader(blockStart: 0, size: capacity, isFree: true);
+        WriteBlock(blockStart: 0, size: capacity, isFree: true);
     }
 
     private static int Align(int n)
@@ -30,11 +32,15 @@ public sealed class BlockAllocator
         return (n + (Alignment - 1)) / Alignment * Alignment;
     }
 
-    private void WriteHeader(int blockStart, int size, bool isFree)
+    private void WriteBlock(int blockStart, int size, bool isFree)
     {
         if (size % Alignment != 0)
             throw new ArgumentException("size must be aligned");
-        BinaryPrimitives.WriteInt32LittleEndian(_arena.AsSpan(blockStart), size | (isFree ? 1 : 0));
+        var headerPos = blockStart;
+        BinaryPrimitives.WriteInt32LittleEndian(_arena.AsSpan(headerPos), size | (isFree ? 1 : 0));
+        
+        var footerPos = blockStart + size - FooterSize;
+        BinaryPrimitives.WriteInt32LittleEndian(_arena.AsSpan(footerPos), size | (isFree ? 1 : 0));
     }
 
     private int ReadRaw(int blockStart)
@@ -43,6 +49,12 @@ public sealed class BlockAllocator
     private int ReadSize(int blockStart)
     {
         var size = ReadRaw(blockStart);
+        return size & ~1;
+    }
+
+    private int ReadPrevSize(int blockStart)
+    {
+        var size = ReadRaw(blockStart - FooterSize);
         return size & ~1;
     }
 
@@ -60,7 +72,7 @@ public sealed class BlockAllocator
             return false;
         }
 
-        var need = HeaderSize + Align(size);
+        var need = BlockOverhead + Align(size);
         var pos = 0;
         var blockSize = 0;
         while (pos < Capacity)
@@ -85,12 +97,12 @@ public sealed class BlockAllocator
         var leftover = blockSize - need;
         if (leftover >= MinBlock) // "남는 게 충분하면"
         {
-            WriteHeader(pos, need, false);
-            WriteHeader(pos + need, leftover, true); // ← 쪼개고 있다
+            WriteBlock(pos, need, false);
+            WriteBlock(pos + need, leftover, true); // ← 쪼개고 있다
         }
         else // "남는 게 너무 작으면"   
         {
-            WriteHeader(pos, blockSize, false); // ← 통째로 주고 있다
+            WriteBlock(pos, blockSize, false); // ← 통째로 주고 있다
         }
 
         offset = pos + HeaderSize;
@@ -110,14 +122,32 @@ public sealed class BlockAllocator
         // 이미 비어 있으면 스킵
         if (IsFree(start))
             return false;
-        WriteHeader(start, size, true);
+        
+        // 뒤와 합치지
+        var next = start + size;
+        if(next < Capacity && IsFree(next))
+            size += ReadSize(next);
+        
+        // 앞에 공간이 있으면 앞과 합치지
+        if (start > 0)
+        {
+            var prevSize = ReadPrevSize(start);
+            var prevStart = start - prevSize;
+            if (IsFree(prevStart))
+            {
+                start = prevStart;
+                size += prevSize;
+            }
+        }
+        
+        WriteBlock(start, size, true);
         return true;
     }
 
     public Span<byte> AsSpan(int offset)
     {
         var start = offset - HeaderSize;
-        var length = ReadSize(start) - HeaderSize;
+        var length = ReadSize(start) - BlockOverhead;
         return _arena.AsSpan(offset, length);
     }
 
@@ -137,7 +167,7 @@ public sealed class BlockAllocator
             if (pos + size > Capacity)
                 throw new Exception($"블록 헤더가 깨졌다 — pos={pos}, size={size}");
 
-            var payload = size - HeaderSize;
+            var payload = size - BlockOverhead;
             if (IsFree(pos))
             {
                 freeBytes += payload;
@@ -149,7 +179,7 @@ public sealed class BlockAllocator
                 usedBytes += payload;
             }
 
-            overheadBytes += HeaderSize;
+            overheadBytes += BlockOverhead;
             pos += size;
         }
 

@@ -326,13 +326,14 @@ public class BlockAllocatorTest
         var a = new BlockAllocator(1024);
         var all = FillArena(a, 64);
         Assert.True(all.Count >= 4);
+        int tail = a.GetStats().FreeBlockCount;   // 꼬리에 자투리가 남을 수 있다
 
         a.Free(all[1]);
-        Assert.Equal(1, a.GetStats().FreeBlockCount);
+        Assert.Equal(tail + 1, a.GetStats().FreeBlockCount);
 
         a.Free(all[0]);
 
-        Assert.Equal(1, a.GetStats().FreeBlockCount);
+        Assert.Equal(tail + 1, a.GetStats().FreeBlockCount);
     }
 
     // 앞 블록의 크기를 알아야 하므로 푸터가 필요하다
@@ -342,13 +343,14 @@ public class BlockAllocatorTest
         var a = new BlockAllocator(1024);
         var all = FillArena(a, 64);
         Assert.True(all.Count >= 4);
+        int tail = a.GetStats().FreeBlockCount;
 
         a.Free(all[0]);
-        Assert.Equal(1, a.GetStats().FreeBlockCount);
+        Assert.Equal(tail + 1, a.GetStats().FreeBlockCount);
 
         a.Free(all[1]);
 
-        Assert.Equal(1, a.GetStats().FreeBlockCount);
+        Assert.Equal(tail + 1, a.GetStats().FreeBlockCount);
     }
 
     [Fact]
@@ -357,14 +359,15 @@ public class BlockAllocatorTest
         var a = new BlockAllocator(1024);
         var all = FillArena(a, 64);
         Assert.True(all.Count >= 5);
+        int tail = a.GetStats().FreeBlockCount;
 
         a.Free(all[0]);
         a.Free(all[2]);
-        Assert.Equal(2, a.GetStats().FreeBlockCount);
+        Assert.Equal(tail + 2, a.GetStats().FreeBlockCount);
 
         a.Free(all[1]);
 
-        Assert.Equal(1, a.GetStats().FreeBlockCount);
+        Assert.Equal(tail + 1, a.GetStats().FreeBlockCount);
     }
 
     [Fact]
