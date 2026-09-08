@@ -6,12 +6,14 @@ public sealed class BlockAllocator
 {
     private const int HeaderSize = 4; // int 하나
     private const int Alignment = 4; // 모든 블록 크기는 4의 배수
-    private const int MinPayload = 4; // 이보다 작은 자리는 만들지 않는다
+    private const int MinPayload = 8; // 이보다 작은 자리는 만들지 않는다
     private const int FooterSize = 4;
     private const int BlockOverhead = HeaderSize + FooterSize;
     private const int MinBlock = BlockOverhead + MinPayload;
 
     private readonly byte[] _arena;
+
+    private int _freeHead;
 
     public int Capacity => _arena.Length;
 
@@ -23,8 +25,11 @@ public sealed class BlockAllocator
             throw new ArgumentException("capacity must be at least " + MinBlock);
         if (capacity % Alignment != 0)
             throw new ArgumentException("capacity must be aligned");
+       
+        _freeHead = -1;
         _arena = new byte[capacity];
         WriteBlock(blockStart: 0, size: capacity, isFree: true);
+        PushFree(0);
     }
 
     private static int Align(int n)
@@ -38,9 +43,41 @@ public sealed class BlockAllocator
             throw new ArgumentException("size must be aligned");
         var headerPos = blockStart;
         BinaryPrimitives.WriteInt32LittleEndian(_arena.AsSpan(headerPos), size | (isFree ? 1 : 0));
-        
+
         var footerPos = blockStart + size - FooterSize;
         BinaryPrimitives.WriteInt32LittleEndian(_arena.AsSpan(footerPos), size | (isFree ? 1 : 0));
+    }
+
+    private int PrevPos(int blockStart)
+    {
+        return blockStart + HeaderSize;
+    }
+
+    private int NextPos(int blockStart)
+    {
+        return blockStart + HeaderSize + 4;
+    }
+
+    private int ReadPrev(int blockStart)
+    {
+        return ReadRaw(PrevPos(blockStart));
+    }
+
+    private int ReadNext(int blockStart)
+    {
+        return ReadRaw(NextPos(blockStart));
+    }
+
+    private void WritePrev(int blockStart, int value)
+    {
+        var prevPos = PrevPos(blockStart);
+        BinaryPrimitives.WriteInt32LittleEndian(_arena.AsSpan(prevPos), value);
+    }
+
+    private void WriteNext(int blockStart, int value)
+    {
+        var next = NextPos(blockStart);
+        BinaryPrimitives.WriteInt32LittleEndian(_arena.AsSpan(next), value);
     }
 
     private int ReadRaw(int blockStart)
@@ -64,6 +101,7 @@ public sealed class BlockAllocator
         return (size & 1) != 0;
     }
 
+
     public bool TryAlloc(int size, out int offset)
     {
         if (size <= 0)
@@ -71,38 +109,35 @@ public sealed class BlockAllocator
             offset = 0;
             return false;
         }
-
-        var need = BlockOverhead + Align(size);
-        var pos = 0;
+        var need = Math.Max(MinBlock, BlockOverhead + Align(size));
+        
+        var pos = _freeHead;
         var blockSize = 0;
-        while (pos < Capacity)
+        
+        while (pos != -1)
         {
             blockSize = ReadSize(pos);
-
-            if (IsFree(pos) && blockSize >= need)
-            {
-                break;
-            }
-
-            pos += blockSize;
+            if (blockSize >= need) break;
+            pos = ReadNext(pos);
         }
-
-        // 끝까지 못찾은 상태
-        if (pos >= Capacity)
+        if (pos == -1)
         {
             offset = 0;
             return false;
         }
 
+        RemoveFree(pos);
+        
         var leftover = blockSize - need;
         if (leftover >= MinBlock) // "남는 게 충분하면"
         {
             WriteBlock(pos, need, false);
             WriteBlock(pos + need, leftover, true); // ← 쪼개고 있다
+            PushFree(pos + need); // ← 쪼갠 나머지를 등록
         }
         else // "남는 게 너무 작으면"   
         {
-            WriteBlock(pos, blockSize, false); // ← 통째로 주고 있다
+            WriteBlock(pos, blockSize, false); 
         }
 
         offset = pos + HeaderSize;
@@ -113,7 +148,7 @@ public sealed class BlockAllocator
     {
         if (offset < HeaderSize || offset >= Capacity)
             return false;
-        if(offset % Alignment != 0)
+        if (offset % Alignment != 0)
             return false;
         var start = offset - HeaderSize;
         var size = ReadSize(start);
@@ -122,12 +157,15 @@ public sealed class BlockAllocator
         // 이미 비어 있으면 스킵
         if (IsFree(start))
             return false;
-        
+
         // 뒤와 합치지
         var next = start + size;
-        if(next < Capacity && IsFree(next))
+        if (next < Capacity && IsFree(next))
+        {
+            RemoveFree(next);
             size += ReadSize(next);
-        
+        }
+
         // 앞에 공간이 있으면 앞과 합치지
         if (start > 0)
         {
@@ -135,15 +173,39 @@ public sealed class BlockAllocator
             var prevStart = start - prevSize;
             if (IsFree(prevStart))
             {
+                RemoveFree(prevStart);
                 start = prevStart;
                 size += prevSize;
             }
         }
-        
+
         WriteBlock(start, size, true);
+        PushFree(start);
         return true;
     }
 
+    private void PushFree(int blockStart)
+    {
+        WritePrev(blockStart, -1);
+        WriteNext(blockStart, _freeHead);
+        if(_freeHead != -1)
+            WritePrev(_freeHead, blockStart); // 기존 머리가 나를 앞으로 가리키게
+        
+        _freeHead = blockStart;
+    }
+
+    private void RemoveFree(int blockStart)
+    {
+        var prev = ReadPrev(blockStart);
+        var next = ReadNext(blockStart);
+        if (prev != -1)
+            WriteNext(prev, next);
+        else
+            _freeHead = next;
+        if (next != -1)
+            WritePrev(next, prev);
+    }
+    
     public Span<byte> AsSpan(int offset)
     {
         var start = offset - HeaderSize;

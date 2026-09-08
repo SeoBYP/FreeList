@@ -22,10 +22,6 @@ var result3 = allocator.TryAlloc(8, out int offset3);
 Console.WriteLine($"result: {result3}, offset: {offset3}");
 allocator.GetStats().Print();
 
-var result4 = allocator.TryAlloc(8, out int offset4);
-Console.WriteLine($"result: {result4}, offset: {offset4}");
-allocator.GetStats().Print();
-
 Console.WriteLine("Freeing...");
 allocator.Free(offset3);
 allocator.GetStats().Print();
