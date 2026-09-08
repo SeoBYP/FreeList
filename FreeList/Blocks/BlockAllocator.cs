@@ -130,7 +130,7 @@ public sealed class BlockAllocator
 
     public bool TryAlloc(int size, out int offset)
     {
-        if (size <= 0)
+        if (size <= 0 || size > Capacity)
         {
             offset = 0;
             return false;
@@ -231,9 +231,21 @@ public sealed class BlockAllocator
     
     public Span<byte> AsSpan(int offset)
     {
+        if (offset < HeaderSize || offset >= Capacity)
+            throw new ArgumentException(nameof(offset));
+        if (offset % Alignment != 0)
+            throw new ArgumentException(nameof(offset));
+        
         var start = offset - HeaderSize;
-        var length = ReadSize(start) - BlockOverhead;
-        return _arena.AsSpan(offset, length);
+        var blockSize  = ReadSize(start);
+        
+        if(blockSize  < MinBlock || start + blockSize  > Capacity)
+            throw new ArgumentException(nameof(offset));
+        if (IsFree(start))
+            throw new ArgumentException("Block is free");
+
+        var size = blockSize - BlockOverhead;
+        return _arena.AsSpan(offset, size);
     }
 
     private int FindFit(int need)

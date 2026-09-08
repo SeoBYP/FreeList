@@ -1,4 +1,4 @@
-namespace FreeList.Test;
+﻿namespace FreeList.Test;
 
 /// <summary>
 /// BlockAllocator 회귀 테스트.
@@ -108,12 +108,32 @@ public class BlockAllocatorTest
         Assert.True(a.GetStats().UsedBytes >= 64);
     }
 
-    [Fact]
-    public void 용량보다_큰_요청은_거부된다()
+    // 2147483637 이상은 Align()과 +BlockOverhead에서 int가 넘쳐
+    // need가 음수가 되고 Math.Max가 MinBlock을 골라버린다 (2GB 요청에 8바이트를 주고 true)
+    [Theory]
+    [InlineData(2048)]
+    [InlineData(2147483637)]
+    [InlineData(int.MaxValue)]
+    public void 용량보다_큰_요청은_거부된다(int size)
     {
         var a = new BlockAllocator(1024);
 
-        Assert.False(a.TryAlloc(2048, out _));
+        Assert.False(a.TryAlloc(size, out _));
+    }
+
+    // 성공했다면 반드시 요청한 만큼은 줘야 한다. 실패는 상관없다
+    [Fact]
+    public void 성공한_할당은_언제나_요청한_크기_이상을_준다()
+    {
+        var a = new BlockAllocator(1024);
+
+        foreach (int size in new[] { 1, 4, 37, 64, 512, 1000, 2147483637, int.MaxValue })
+        {
+            if (!a.TryAlloc(size, out int offset)) continue;
+
+            int given = a.AsSpan(offset).Length;
+            Assert.True(given >= size, $"{size}바이트를 요청했는데 {given}바이트만 줬다");
+        }
     }
 
     [Theory]
@@ -222,6 +242,30 @@ public class BlockAllocatorTest
         a.Free(99999);
 
         Assert.Equal(used, a.GetStats().UsedBytes);
+    }
+
+    // 해제된 블록은 크기가 멀쩡히 읽혀서 아무도 안 잡는다. AsSpan이 막아야 한다
+    [Fact]
+    public void 해제된_블록에는_스팬을_주지_않는다()
+    {
+        var a = new BlockAllocator(1024);
+        a.TryAlloc(64, out int offset);
+        a.Free(offset);
+
+        Assert.ThrowsAny<ArgumentException>(() => { _ = a.AsSpan(offset).Length; });
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(0)]
+    [InlineData(1024)]
+    [InlineData(999999)]
+    public void 범위_밖_오프셋은_스팬을_주지_않는다(int offset)
+    {
+        var a = new BlockAllocator(1024);
+        a.TryAlloc(64, out _);
+
+        Assert.ThrowsAny<ArgumentException>(() => { _ = a.AsSpan(offset).Length; });
     }
 
     // ── 재사용 ────────────────────────────────────────
