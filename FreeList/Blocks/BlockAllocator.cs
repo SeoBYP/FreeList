@@ -4,6 +4,9 @@ namespace FreeList;
 
 public sealed class BlockAllocator
 {
+    public enum FitPolicy { First, Best }
+    public FitPolicy Policy { get; set; } = FitPolicy.First;
+    
     private const int HeaderSize = 4; // int 하나
     private const int Alignment = 4; // 모든 블록 크기는 4의 배수
     private const int MinPayload = 8; // 이보다 작은 자리는 만들지 않는다
@@ -14,6 +17,29 @@ public sealed class BlockAllocator
     private readonly byte[] _arena;
 
     private int _freeHead;
+
+    // ── 측정용 계측. 동작에는 영향이 없다 ──────────────
+    private long _probeCount;       // 탐색 루프가 빈 블록을 들여다본 총 횟수
+    private long _failProbeCount;   // 그중 실패한 탐색이 쓴 몫
+    private long _allocCount;       // 성공한 할당 수
+
+    public long ProbeCount => _probeCount;
+    public long FailProbeCount => _failProbeCount;
+    public long AllocCount => _allocCount;
+
+    /// <summary>
+    /// 성공한 탐색만 센 평균. 실패한 탐색은 리스트를 끝까지 훑으므로
+    /// 섞어서 세면 지표가 오염된다 (작은 객체 워크로드에서 절반 이상이 실패 몫이었다).
+    /// </summary>
+    public double ProbesPerAlloc
+        => _allocCount == 0 ? 0 : (double)(_probeCount - _failProbeCount) / _allocCount;
+
+    public void ResetCounters()
+    {
+        _probeCount = 0;
+        _failProbeCount = 0;
+        _allocCount = 0;
+    }
 
     public int Capacity => _arena.Length;
 
@@ -111,35 +137,32 @@ public sealed class BlockAllocator
         }
         var need = Math.Max(MinBlock, BlockOverhead + Align(size));
         
-        var pos = _freeHead;
-        var blockSize = 0;
-        
-        while (pos != -1)
-        {
-            blockSize = ReadSize(pos);
-            if (blockSize >= need) break;
-            pos = ReadNext(pos);
-        }
+        var probesBefore = _probeCount;
+        var pos = FindFit(need);
         if (pos == -1)
         {
+            _failProbeCount += _probeCount - probesBefore;
             offset = 0;
             return false;
         }
-
+        var blockSize = ReadSize(pos);
+        
+        
         RemoveFree(pos);
         
         var leftover = blockSize - need;
-        if (leftover >= MinBlock) // "남는 게 충분하면"
+        if (leftover >= MinBlock)
         {
             WriteBlock(pos, need, false);
-            WriteBlock(pos + need, leftover, true); // ← 쪼개고 있다
-            PushFree(pos + need); // ← 쪼갠 나머지를 등록
+            WriteBlock(pos + need, leftover, true);
+            PushFree(pos + need);
         }
-        else // "남는 게 너무 작으면"   
+        else   // 쪼개면 아무도 못 쓰는 조각이 남는다. 통째로 준다
         {
             WriteBlock(pos, blockSize, false); 
         }
 
+        _allocCount++;
         offset = pos + HeaderSize;
         return true;
     }
@@ -154,11 +177,11 @@ public sealed class BlockAllocator
         var size = ReadSize(start);
         if (size < MinBlock || start + size > Capacity)
             return false;
-        // 이미 비어 있으면 스킵
+        // 이중 해제 거부
         if (IsFree(start))
             return false;
 
-        // 뒤와 합치지
+        // 뒤 블록이 비었으면 흡수한다 (헤더만으로 가능)
         var next = start + size;
         if (next < Capacity && IsFree(next))
         {
@@ -166,7 +189,7 @@ public sealed class BlockAllocator
             size += ReadSize(next);
         }
 
-        // 앞에 공간이 있으면 앞과 합치지
+        // 앞 블록이 비었으면 그쪽에 흡수된다 (푸터로 시작 위치를 역산)
         if (start > 0)
         {
             var prevSize = ReadPrevSize(start);
@@ -201,7 +224,7 @@ public sealed class BlockAllocator
         if (prev != -1)
             WriteNext(prev, next);
         else
-            _freeHead = next;
+            _freeHead = next;   // 내가 머리였으니 다음을 머리로
         if (next != -1)
             WritePrev(next, prev);
     }
@@ -213,6 +236,47 @@ public sealed class BlockAllocator
         return _arena.AsSpan(offset, length);
     }
 
+    private int FindFit(int need)
+    {
+        switch (Policy)
+        {
+            case FitPolicy.First:
+            {
+                var pos = _freeHead;
+                while (pos != -1)
+                {
+                    _probeCount++;
+                    if(ReadSize(pos) >= need)
+                        return pos;
+                    pos = ReadNext(pos);
+                }
+                return -1;
+            }
+            case FitPolicy.Best:
+            {
+                var best = -1;
+                var bestSize = 0;
+                var pos = _freeHead;
+                while (pos != -1)
+                {
+                    _probeCount++;
+                    var bs = ReadSize(pos);
+                    if(bs >= need && (best == -1 || bs < bestSize))
+                    {
+                        best = pos;
+                        bestSize = bs;
+                        if (bs == need)   // 정확히 맞으면 더 나은 후보는 없다
+                            return best;
+                    }
+                    pos = ReadNext(pos);
+                }
+                return best;
+            }
+            default:
+                return -1;
+        }
+    }
+    
     public AllocatorStats GetStats()
     {
         int pos = 0;
