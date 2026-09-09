@@ -7,6 +7,9 @@ public sealed class BlockAllocator
     public enum FitPolicy { First, Best }
     public FitPolicy Policy { get; set; } = FitPolicy.First;
     
+    public enum FreeOrder { Lifo, Address }
+    public FreeOrder Order { get; set; } = FreeOrder.Lifo;
+    
     private const int HeaderSize = 4; // int 하나
     private const int Alignment = 4; // 모든 블록 크기는 4의 배수
     private const int MinPayload = 8; // 이보다 작은 자리는 만들지 않는다
@@ -22,11 +25,18 @@ public sealed class BlockAllocator
     private long _probeCount;       // 탐색 루프가 빈 블록을 들여다본 총 횟수
     private long _failProbeCount;   // 그중 실패한 탐색이 쓴 몫
     private long _allocCount;       // 성공한 할당 수
+    private long _insertProbeCount;   // PushFree의 탐색 루프가 노드를 지나간 횟수
+    private long _freeCount;          // 성공한 해제 수
 
     public long ProbeCount => _probeCount;
     public long FailProbeCount => _failProbeCount;
     public long AllocCount => _allocCount;
+    
+    public long InsertProbeCount => _insertProbeCount;
+    public long FreeCount => _freeCount;
 
+    public double InsertProbesPerFree
+        => _freeCount == 0 ? 0 : (double)_insertProbeCount / _freeCount;
     /// <summary>
     /// 성공한 탐색만 센 평균. 실패한 탐색은 리스트를 끝까지 훑으므로
     /// 섞어서 세면 지표가 오염된다 (작은 객체 워크로드에서 절반 이상이 실패 몫이었다).
@@ -39,6 +49,8 @@ public sealed class BlockAllocator
         _probeCount = 0;
         _failProbeCount = 0;
         _allocCount = 0;
+        _insertProbeCount = 0;
+        _freeCount = 0;
     }
 
     public int Capacity => _arena.Length;
@@ -147,7 +159,9 @@ public sealed class BlockAllocator
         }
         var blockSize = ReadSize(pos);
         
-        
+        var prevFree = ReadPrev(pos);
+        var nextFree = ReadNext(pos);
+
         RemoveFree(pos);
         
         var leftover = blockSize - need;
@@ -155,7 +169,10 @@ public sealed class BlockAllocator
         {
             WriteBlock(pos, need, false);
             WriteBlock(pos + need, leftover, true);
-            PushFree(pos + need);
+            if (Order == FreeOrder.Address)
+                LinkFree(prevFree, pos + need, nextFree);
+            else
+                PushFree(pos + need);
         }
         else   // 쪼개면 아무도 못 쓰는 조각이 남는다. 통째로 준다
         {
@@ -204,17 +221,47 @@ public sealed class BlockAllocator
 
         WriteBlock(start, size, true);
         PushFree(start);
+        _freeCount++;
+        
         return true;
+    }
+
+    private void LinkFree(int prev, int blockStart, int next)
+    {
+        // 첫 시작 부분
+        if (prev == -1)
+            _freeHead = blockStart;
+        else // 아니면 이전 부분에 blockStart를 연결한다.
+            WriteNext(prev, blockStart);
+        
+        WritePrev(blockStart, prev);
+        WriteNext(blockStart, next);
+        
+        // 다음 부분에 blockStart를 연결한다.
+        if (next != -1)
+            WritePrev(next, blockStart);
     }
 
     private void PushFree(int blockStart)
     {
-        WritePrev(blockStart, -1);
-        WriteNext(blockStart, _freeHead);
-        if(_freeHead != -1)
-            WritePrev(_freeHead, blockStart); // 기존 머리가 나를 앞으로 가리키게
+        if (Order == FreeOrder.Lifo)
+        {
+            LinkFree(-1, blockStart, _freeHead);
+            return;
+        }
         
-        _freeHead = blockStart;
+        // 나보다 주소가 큰 첫 노드를 찾는다. 그게 b, 직전에 지나온 것이 a
+        var prev = -1;
+        var cur = _freeHead;
+
+        while (cur != -1 && cur < blockStart)
+        {
+            _insertProbeCount++;
+            prev = cur;
+            cur = ReadNext(cur);
+        }
+        
+        LinkFree(prev, blockStart, cur);
     }
 
     private void RemoveFree(int blockStart)
@@ -329,5 +376,64 @@ public sealed class BlockAllocator
             FreeBytes = freeBytes,
             OverheadBytes = overheadBytes,
         };
+    }
+
+    /// <summary>
+    /// 진단용. 아레나를 물리적으로 걸으며 빈 블록의 시작 위치를 주소 오름차순으로 모은다.
+    /// GetStats와 같은 루프이며, 세는 대신 위치를 담는다는 것만 다르다.
+    /// </summary>
+    public int[] DebugFreeBlockStarts()
+    {
+        var starts = new List<int>();
+        var pos = 0;
+        while (pos < Capacity)
+        {
+            var size = ReadSize(pos);
+            if (size < MinBlock)
+                throw new InvalidOperationException($"블록 크기가 너무 작다 — pos={pos}, size={size}");
+            if (pos + size > Capacity)
+                throw new InvalidOperationException($"블록 헤더가 깨졌다 — pos={pos}, size={size}");
+
+            if (IsFree(pos))
+                starts.Add(pos);
+
+            pos += size;
+        }
+
+        return starts.ToArray();
+    }
+
+    /// <summary>
+    /// 진단용. free 리스트를 머리부터 따라가며 블록 시작 위치를 체인 순서대로 모은다.
+    ///
+    /// DebugFreeBlockStarts()와 비교하는 것이 이 자료구조의 핵심 불변식이다.
+    ///   Order가 Address면 두 결과가 순서까지 같아야 하고,
+    ///   Lifo면 집합으로 같아야 한다.
+    /// </summary>
+    public int[] DebugFreeList()
+    {
+        // 빈 블록은 아무리 많아도 이 개수를 넘을 수 없다. 넘었다면 체인에 순환이 있다.
+        // 이 방어가 없으면 링크가 꼬였을 때 테스트가 빨간불 대신 멈춘다.
+        var limit = Capacity / MinBlock;
+
+        var chain = new List<int>();
+        var pos = _freeHead;
+        while (pos != -1)
+        {
+            if (pos < 0 || pos >= Capacity || pos % Alignment != 0)
+                throw new InvalidOperationException(
+                    $"free 리스트가 블록 시작이 아닌 곳을 가리킨다 — pos={pos}, "
+                    + $"지금까지 경로=[{string.Join(", ", chain)}]");
+
+            if (chain.Count >= limit)
+                throw new InvalidOperationException(
+                    $"free 리스트에 순환이 있다 — {limit}개를 넘게 걸었다. "
+                    + $"_freeHead={_freeHead}, 경로=[{string.Join(", ", chain.Take(20))}...]");
+
+            chain.Add(pos);
+            pos = ReadNext(pos);
+        }
+
+        return chain.ToArray();
     }
 }
